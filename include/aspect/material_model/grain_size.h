@@ -400,6 +400,12 @@ namespace aspect
         bool use_enthalpy;
         bool use_bilinear_interpolation;
 
+        /**
+         * The following parameters are defined for Mulyukova (2018) grain
+         * damage implementation
+         */
+        double phase_distribution_parameter;
+
 
         /**
          * The format of the provided material files. Currently we support

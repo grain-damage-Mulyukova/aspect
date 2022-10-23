@@ -1232,6 +1232,12 @@ namespace aspect
                              Patterns::Bool (),
                              "This parameter determines whether to use bilinear interpolation "
                              "to compute material properties (slower but more accurate).");
+          prm.declare_entry ("Phase distribution parameter", "0.72",
+                             Patterns::Double (0.),
+                             "This parameter is equal to $3*\\phi_1*\\phi_2*, where $\\phi_1$ "
+                             "and $\\phi_2$ are volume fractions of lithospheric phases. "
+                             "By default it is set to the value used in the models by Mulyukova "
+                             "and Bercovici (2018).");
         }
         prm.leave_subsection();
       }
@@ -1337,6 +1343,7 @@ namespace aspect
           max_latent_heat_substeps              = prm.get_integer ("Maximum latent heat substeps");
           min_grain_size                        = prm.get_double ("Minimum grain size");
           pv_grain_size_scaling                 = prm.get_double ("Lower mantle grain size scaling");
+          phase_distribution_parameter          = prm.get_double ("Phase distribution parameter");
 
           // scale recrystallized grain size, diffusion creep and grain growth prefactor accordingly
           diffusion_creep_prefactor[diffusion_creep_prefactor.size()-1] *= pow(pv_grain_size_scaling,diffusion_creep_grain_size_exponent[diffusion_creep_grain_size_exponent.size()-1]);
