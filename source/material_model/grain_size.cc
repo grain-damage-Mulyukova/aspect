@@ -267,7 +267,7 @@ namespace aspect
 
           double grain_size_reduction = 0.0;
 
-          if (use_paleowattmeter)
+          if (grain_size_evolution_formulation == Formulation::paleowattmeter)
             {
               // paleowattmeter: Austin and Evans (2007): Paleowattmeters: A scaling relation for dynamically recrystallized grain size. Geology 35, 343-346
               const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
@@ -1064,8 +1064,14 @@ namespace aspect
                              "The grain size $d_{ph}$ to that a phase will be reduced to when crossing a phase transition. "
                              "When set to zero, grain size will not be reduced. "
                              "Units: \\si{\\meter}.");
-          prm.declare_entry ("Use paleowattmeter", "true",
-                             Patterns::Bool (),
+          prm.declare_entry ("Grain size evolution formulation", "paleowattmeter",
+                             Patterns::Selection ("paleowattmeter|paleopiezometer|pinned grain damage"),
+                             "A flag indicating whether the computation should be use the "
+                             "paleowattmeter approach of Austin and Evans (2007) for grain size reduction "
+                             "in the dislocation creep regime (if true) or the paleopiezometer approach "
+                             "from Hall and Parmetier (2003) (if false). TODO update.");
+          prm.declare_entry ("Use paleowattmeter", "default",
+                             Patterns::Selection ("true|false|default"),
                              "A flag indicating whether the computation should be use the "
                              "paleowattmeter approach of Austin and Evans (2007) for grain size reduction "
                              "in the dislocation creep regime (if true) or the paleopiezometer approach "
@@ -1298,7 +1304,13 @@ namespace aspect
           reciprocal_required_strain            = Utilities::string_to_double
                                                   (Utilities::split_string_list(prm.get ("Reciprocal required strain")));
 
-          use_paleowattmeter                    = prm.get_bool ("Use paleowattmeter");
+          grain_size_evolution_formulation                    = Formulation::parse(prm.get("Grain size evolution formulation"));
+
+          std::string use_paleowattmeter = prm.get ("Use paleowattmeter");
+          Assert(use_paleowattmeter == "default",
+                 ExcMessage("The parameter 'Use paleowattmeter' is deprecated. Use the parameter 'Grain size evolution formulation instead'."));
+
+
           grain_boundary_energy                 = Utilities::string_to_double
                                                   (Utilities::split_string_list(prm.get ("Average specific grain boundary energy")));
           boundary_area_change_work_fraction    = Utilities::string_to_double
@@ -1344,7 +1356,7 @@ namespace aspect
           if (recrystallized_grain_size.size()>0)
             recrystallized_grain_size[recrystallized_grain_size.size()-1] *= pv_grain_size_scaling;
 
-          if (use_paleowattmeter)
+          if (grain_size_evolution_formulation == Formulation::paleowattmeter)
             boundary_area_change_work_fraction[boundary_area_change_work_fraction.size()-1] /= pv_grain_size_scaling;
 
 
@@ -1367,7 +1379,7 @@ namespace aspect
                         ExcMessage("Error: The lists of grain size evolution and flow law parameters "
                                    "need to have the same length!"));
 
-          if (use_paleowattmeter)
+          if (grain_size_evolution_formulation == Formulation::paleowattmeter)
             {
               if (grain_growth_activation_energy.size() != grain_boundary_energy.size() ||
                   grain_growth_activation_energy.size() != boundary_area_change_work_fraction.size() ||
