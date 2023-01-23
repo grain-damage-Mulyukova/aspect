@@ -272,7 +272,7 @@ namespace aspect
                                                        / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
               grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
             }
-          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)  
+          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
             {
               // pinned_grain_damage: Mulyukova and Bercovici (2018) Collapse of passive margins by lithospheric damage and plunging grain size. Earth and Planetary Science Letters, 484, 341-352.
               const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
@@ -870,8 +870,20 @@ namespace aspect
 
               if (HeatingModel::ShearHeatingOutputs<dim> *shear_heating_out = out.template get_additional_output<HeatingModel::ShearHeatingOutputs<dim>>())
                 {
-                  const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
-                  shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
+                  if (grain_size_evolution_formulation == Formulation::paleowattmeter ||
+                      grain_size_evolution_formulation == Formulation::paleopiezometer)
+                    {
+                      const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
+                    }
+                  else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+                    {
+                      // TODO: f still needs to be updated with the new T-dependent parameter
+                      const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f;
+                    }
+                  else
+                    AssertThrow(false, ExcNotImplemented());
                 }
             }
 
