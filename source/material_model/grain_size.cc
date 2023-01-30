@@ -195,6 +195,25 @@ namespace aspect
     template <int dim>
     double
     GrainSize<dim>::
+    compute_partitioning_fraction (const double temperature) const
+    {
+      const double power_term_numerator    =  std::pow (mantle_temperature, grain_size_reduction_work_fraction_exponent) -
+                                              std::pow (temperature, grain_size_reduction_work_fraction_exponent);
+
+      const double power_term_denominator  =  std::pow (mantle_temperature, grain_size_reduction_work_fraction_exponent) -
+                                              std::pow (surface_temperature, grain_size_reduction_work_fraction_exponent);
+
+      const double partitioning_fraction = minimum_grain_size_reduction_work_fraction * std::pow((maximum_grain_size_reduction_work_fraction/minimum_grain_size_reduction_work_fraction),
+                                           (power_term_numerator/power_term_denominator));
+
+      return partitioning_fraction;
+    }
+
+
+
+    template <int dim>
+    double
+    GrainSize<dim>::
     grain_size_change (const double                  temperature,
                        const double                  pressure,
                        const std::vector<double>    &compositional_fields,
@@ -282,11 +301,11 @@ namespace aspect
                                                        / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
               grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
             }
-          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)  
+          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
             {
               // pinned_grain_damage: Mulyukova and Bercovici (2018) Collapse of passive margins by lithospheric damage and plunging grain size. Earth and Planetary Science Letters, 484, 341-352.
               const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
-              const double grain_size_reduction_rate = 2.0 * stress * boundary_area_change_work_fraction[phase_index] * second_strain_rate_invariant * pow(grain_size,2)
+              const double grain_size_reduction_rate = 2.0 * stress * compute_partitioning_fraction(temperature) * second_strain_rate_invariant * pow(grain_size,2)
                                                        / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
               grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
             }
@@ -833,8 +852,19 @@ namespace aspect
 
               if (HeatingModel::ShearHeatingOutputs<dim> *shear_heating_out = out.template get_additional_output<HeatingModel::ShearHeatingOutputs<dim>>())
                 {
-                  const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
-                  shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
+                  if (grain_size_evolution_formulation == Formulation::paleowattmeter ||
+                      grain_size_evolution_formulation == Formulation::paleopiezometer)
+                    {
+                      const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
+                    }
+                  else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+                    {
+                      const double f = compute_partitioning_fraction(in.temperature[i]);
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f;
+                    }
+                  else
+                    AssertThrow(false, ExcNotImplemented());
                 }
             }
 
@@ -1210,6 +1240,35 @@ namespace aspect
                              Patterns::Bool (),
                              "This parameter determines whether to use bilinear interpolation "
                              "to compute material properties (slower but more accurate).");
+          prm.enter_subsection("Grain damage partitioning");
+          {
+            prm.declare_entry ("Mantle temperature", "1600",
+                               Patterns::Double (0.),
+                               "This parameter determines the temperature at which the computed coefficient of shear energy "
+                               "partitioned into grain damage is minimum. This is used in the pinned state limit of the grain "
+                               "size evolution. One choice of this parameter is the mantle temperature at the ridge axis, "
+                               "see Mulyukova, E., & Bercovici, D. (2018) for details.");
+            prm.declare_entry ("Surface temperature", "283",
+                               Patterns::Double (0.),
+                               "This parameter determines the temperature at which the computed coefficient of shear energy "
+                               "partitioned into grain damage is maximum. This is used in the pinned state limit of the grain "
+                               "size evolution. One choice of this parameter is the surface temperature of the seafloor, see "
+                               "Mulyukova, E., & Bercovici, D. (2018) for details.");
+            prm.declare_entry ("Minimum grain size reduction work fraction", "1e-12",
+                               Patterns::Double (0.),
+                               "This parameter determines the minimum value of the partitioning coefficient, which governs "
+                               "amount of shear heating partitioned into grain damage in the pinned state limit." );
+            prm.declare_entry ("Maximum grain size reduction work fraction", "1e-1",
+                               Patterns::Double (0.),
+                               "This parameter determines the maximum value of the partitioning coefficient, which governs "
+                               "amount of shear heating partitioned into grain damage in the pinned state limit.");
+            prm.declare_entry ("Grain size reduction work fraction exponent", "10",
+                               Patterns::Double (0.),
+                               "This parameter determines the variability in how much shear heating is partitioned into "
+                               "grain damage. A higher value suggests a wider temperature range over which the partitioning "
+                               "coefficient is high.");
+          }
+          prm.leave_subsection();
         }
         prm.leave_subsection();
       }
@@ -1291,6 +1350,19 @@ namespace aspect
                                                   (Utilities::split_string_list(prm.get ("Work fraction for boundary area change")));
           geometric_constant                    = Utilities::string_to_double
                                                   (Utilities::split_string_list(prm.get ("Geometric constant")));
+
+          if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            {
+              prm.enter_subsection("Grain damage partitioning");
+              {
+                grain_size_reduction_work_fraction_exponent = prm.get_double ("Grain size reduction work fraction exponent");
+                maximum_grain_size_reduction_work_fraction  = prm.get_double ("Maximum grain size reduction work fraction");
+                minimum_grain_size_reduction_work_fraction  = prm.get_double ("Minimum grain size reduction work fraction");
+                mantle_temperature                          = prm.get_double ("Mantle temperature");
+                surface_temperature                         = prm.get_double ("Surface temperature");
+              }
+              prm.leave_subsection();
+            }
 
           // rheology parameters
           dislocation_viscosity_iteration_threshold = prm.get_double("Dislocation viscosity iteration threshold");
