@@ -1442,10 +1442,22 @@ namespace aspect
                             ExcMessage("Error: One of the lists of grain size evolution parameters "
                                        "given for the paleowattmeter does not have the correct length!"));
             }
+          else if (grain_size_evolution_formulation == Formulation::paleopiezometer)
+            {
+              AssertThrow(grain_growth_activation_energy.size() == reciprocal_required_strain.size(),
+                          ExcMessage("Error: The list of grain size evolution parameters in the "
+                                     "paleopiezometer does not have the correct length!"));
+            }
+          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            {
+              AssertThrow(transition_depths.size() == 0,
+                          ExcMessage("Error: Currently, the pinned grain damage formulation is only implemented for one mineral phase."));
+            }
           else
-            AssertThrow(grain_growth_activation_energy.size() == reciprocal_required_strain.size(),
-                        ExcMessage("Error: The list of grain size evolution parameters in the "
-                                   "paleopiezometer does not have the correct length!"));
+            AssertThrow(false,
+                        ExcMessage("Error: The size of lists in grain size evolution and flow law parameters "
+                                   "should follow either of the 'paleowattmeter|paleopiezometer|pinned grain damage' "
+                                   "formulations!"));
 
           AssertThrow(grain_growth_activation_energy.size() == transition_depths.size()+1,
                       ExcMessage("Error: The lists of grain size evolution and flow law parameters need to "
