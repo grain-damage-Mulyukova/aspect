@@ -742,6 +742,9 @@ namespace aspect
     GrainSize<dim>::
     evaluate(const typename Interface<dim>::MaterialModelInputs &in, typename Interface<dim>::MaterialModelOutputs &out) const
     {
+      AssertThrow( (grain_size_evolution_formulation != Formulation::paleopiezometer || !this->get_heating_model_manager().shear_heating_enabled()),
+                   ExcMessage("Shear heating output should not be used with the Paleopiezometer grain damage formulation."));
+
       for (unsigned int i=0; i<in.n_evaluation_points(); ++i)
         {
           // Use the adiabatic pressure instead of the real one, because of oscillations
@@ -854,8 +857,7 @@ namespace aspect
 
               if (HeatingModel::ShearHeatingOutputs<dim> *shear_heating_out = out.template get_additional_output<HeatingModel::ShearHeatingOutputs<dim>>())
                 {
-                  if (grain_size_evolution_formulation == Formulation::paleowattmeter ||
-                      grain_size_evolution_formulation == Formulation::paleopiezometer)
+                  if (grain_size_evolution_formulation == Formulation::paleowattmeter)
                     {
                       const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
                       shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
@@ -1257,11 +1259,11 @@ namespace aspect
                                "size evolution. One choice of this parameter is the surface temperature of the seafloor, see "
                                "Mulyukova, E., & Bercovici, D. (2018) for details.");
             prm.declare_entry ("Minimum grain size reduction work fraction", "1e-12",
-                               Patterns::Double (0.),
+                               Patterns::Double (0., 1.),
                                "This parameter determines the minimum value of the partitioning coefficient, which governs "
                                "amount of shear heating partitioned into grain damage in the pinned state limit." );
             prm.declare_entry ("Maximum grain size reduction work fraction", "1e-1",
-                               Patterns::Double (0.),
+                               Patterns::Double (0., 1.),
                                "This parameter determines the maximum value of the partitioning coefficient, which governs "
                                "amount of shear heating partitioned into grain damage in the pinned state limit.");
             prm.declare_entry ("Grain size reduction work fraction exponent", "10",
@@ -1365,6 +1367,12 @@ namespace aspect
               }
               prm.leave_subsection();
             }
+
+          AssertThrow( (maximum_grain_size_reduction_work_fraction > 0. && maximum_grain_size_reduction_work_fraction < 1.),
+                       ExcMessage("Error: Maximum grain size reduction fraction must be between (0, 1)!"));
+
+          AssertThrow( (minimum_grain_size_reduction_work_fraction > 0. && minimum_grain_size_reduction_work_fraction < 1.),
+                       ExcMessage("Error: Minimum grain size reduction fraction must be between (0, 1)!"));
 
           // rheology parameters
           dislocation_viscosity_iteration_threshold = prm.get_double("Dislocation viscosity iteration threshold");
