@@ -22,6 +22,7 @@
 #include <aspect/material_model/grain_size.h>
 #include <aspect/adiabatic_conditions/interface.h>
 #include <aspect/gravity_model/interface.h>
+#include <aspect/heating_model/shear_heating.h>
 #include <aspect/utilities.h>
 
 #include <deal.II/base/quadrature_lib.h>
@@ -55,8 +56,7 @@ namespace aspect
       :
       NamedAdditionalMaterialOutputs<dim>(make_dislocation_viscosity_outputs_names()),
       dislocation_viscosities(n_points, numbers::signaling_nan<double>()),
-      diffusion_viscosities(n_points, numbers::signaling_nan<double>()),
-      boundary_area_change_work_fractions(n_points, numbers::signaling_nan<double>())
+      diffusion_viscosities(n_points, numbers::signaling_nan<double>())
     {}
 
 
@@ -65,7 +65,7 @@ namespace aspect
     std::vector<double>
     DislocationViscosityOutputs<dim>::get_nth_output(const unsigned int idx) const
     {
-      AssertIndexRange (idx, 2);
+      AssertIndexRange (idx, 1);
       switch (idx)
         {
           case 0:
@@ -73,9 +73,6 @@ namespace aspect
 
           case 1:
             return diffusion_viscosities;
-
-          case 2:
-            return boundary_area_change_work_fractions;
 
           default:
             AssertThrow(false, ExcInternalError());
@@ -187,7 +184,6 @@ namespace aspect
     convert_log_grain_size (std::vector<double> &composition) const
     {
       // get grain size and limit it to a global minimum
-      const unsigned int grain_size_index = this->introspection().compositional_index_for_name("grain_size");
       double grain_size = composition[grain_size_index];
       grain_size = std::max(std::exp(-grain_size), min_grain_size);
 
@@ -199,14 +195,35 @@ namespace aspect
     template <int dim>
     double
     GrainSize<dim>::
-    moment_of_grain_size_distribution (const int n) const
+    compute_partitioning_fraction (const double temperature) const
     {
-      // This function normalizes the grain size distribution using the nth moment.
-      // Description can be found in eq 8 of Bercovici and Richard (2012)
-      const double sigma = 0.8;
+      const double power_term_numerator    =  std::pow (mantle_temperature, grain_size_reduction_work_fraction_exponent) -
+                                              std::pow (temperature, grain_size_reduction_work_fraction_exponent);
 
-      return exp (n * n * sigma * sigma / 2.);
+      const double power_term_denominator  =  std::pow (mantle_temperature, grain_size_reduction_work_fraction_exponent) -
+                                              std::pow (surface_temperature, grain_size_reduction_work_fraction_exponent);
+
+      const double partitioning_fraction = minimum_grain_size_reduction_work_fraction * std::pow((maximum_grain_size_reduction_work_fraction/minimum_grain_size_reduction_work_fraction),
+                                           (power_term_numerator/power_term_denominator));
+
+      return partitioning_fraction;
     }
+
+
+
+    namespace
+    {
+      // This function returns the log normal distribution of the grain size.
+      // Description can be found in eq 8 of Bercovici and Ricard (2012)
+      double
+      moment_of_grain_size_distribution (const unsigned int n)
+      {
+        const double sigma = 0.8;
+
+        return exp (n * n * sigma * sigma / 2.);
+      }
+    }
+
 
 
     template <int dim>
@@ -215,7 +232,7 @@ namespace aspect
     roughness_to_grain_size_factor (const double volume_fraction_phase_one)  const
     {
       // This factor is used to convert the roughness equation into mean grain size
-      // Refer to Appendix H.1, eqs 8, F.28 in Bercovici and Richard (2012) for more details.
+      // Refer to Appendix H.1, eqs 8, F.28 in Bercovici and Ricard (2012) for more details.
       const double b1 = 1./20 ;
       const double c1 = 3 * b1 * moment_of_grain_size_distribution(4) / (8 * moment_of_grain_size_distribution (2));
 
@@ -233,7 +250,7 @@ namespace aspect
     GrainSize<dim>::
     phase_distribution_function (const double volume_fraction_phase_one)  const
     {
-      // This factor is used in pinned grain size formulation of the Mulyukova and Bercovici (2018).
+      // This factor is used in pinned state grain damage formulation.
       const double volume_fraction_phase_two = 1. - volume_fraction_phase_one;
 
       return (volume_fraction_phase_one * volume_fraction_phase_two);
@@ -277,6 +294,17 @@ namespace aspect
       // for the next one
       double current_dislocation_viscosity = 0.0;
 
+      const double adiabatic_temperature = this->get_adiabatic_conditions().is_initialized()
+                                           ?
+                                           this->get_adiabatic_conditions().temperature(position)
+                                           :
+                                           temperature;
+      const double adiabatic_pressure = this->get_adiabatic_conditions().is_initialized()
+                                        ?
+                                        this->get_adiabatic_conditions().pressure(position)
+                                        :
+                                        pressure;
+
       do
         {
           time += grain_growth_timestep;
@@ -289,17 +317,17 @@ namespace aspect
 
           // grain size growth due to Ostwald ripening
           const double m = grain_growth_exponent[phase_index];
-          const double grain_size_growth_rate = grain_growth_rate_constant[phase_index] / (m * pow(grain_size,m-1))
-                                                * exp(- (grain_growth_activation_energy[phase_index] + pressure * grain_growth_activation_volume[phase_index])
-                                                      / (constants::gas_constant * temperature));
+          const double grain_size_growth_rate = grain_growth_rate_constant[phase_index] / (m * std::pow(grain_size,m-1))
+                                                * std::exp(- (grain_growth_activation_energy[phase_index] + pressure * grain_growth_activation_volume[phase_index])
+                                                           / (constants::gas_constant * temperature));
           const double grain_size_growth = grain_size_growth_rate * grain_growth_timestep;
 
           // grain size reduction in dislocation creep regime
           const SymmetricTensor<2,dim> shear_strain_rate = strain_rate - 1./dim * trace(strain_rate) * unit_symmetric_tensor<dim>();
           const double second_strain_rate_invariant = std::sqrt(std::max(-second_invariant(shear_strain_rate), 0.));
 
-          const double current_diffusion_viscosity   = diffusion_viscosity(temperature, pressure, current_composition, strain_rate, position);
-          current_dislocation_viscosity              = dislocation_viscosity(temperature, pressure, current_composition, strain_rate, position, current_dislocation_viscosity);
+          const double current_diffusion_viscosity   = diffusion_viscosity(temperature, adiabatic_temperature, adiabatic_pressure, grain_size, second_strain_rate_invariant, position);
+          current_dislocation_viscosity              = dislocation_viscosity(temperature, adiabatic_temperature, adiabatic_pressure, strain_rate, position, current_diffusion_viscosity, current_dislocation_viscosity);
 
           double current_viscosity;
           if (std::abs(second_strain_rate_invariant) > 1e-30)
@@ -316,15 +344,25 @@ namespace aspect
             {
               // paleowattmeter: Austin and Evans (2007): Paleowattmeters: A scaling relation for dynamically recrystallized grain size. Geology 35, 343-346
               const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
-              const double grain_size_reduction_rate = 2.0 * stress * boundary_area_change_work_fraction[phase_index] * dislocation_strain_rate * pow(grain_size,2)
+              const double grain_size_reduction_rate = 2.0 * stress * boundary_area_change_work_fraction[phase_index] * dislocation_strain_rate * std::pow(grain_size,2)
                                                        / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
               grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
             }
-          else
+          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            {
+              // pinned_grain_damage: Mulyukova and Bercovici (2018) Collapse of passive margins by lithospheric damage and plunging grain size. Earth and Planetary Science Letters, 484, 341-352.
+              const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
+              const double grain_size_reduction_rate = 2.0 * stress * compute_partitioning_fraction(temperature) * second_strain_rate_invariant * pow(grain_size,2)
+                                                       / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
+              grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
+            }
+          else if (grain_size_evolution_formulation == Formulation::paleopiezometer)
             {
               // paleopiezometer: Hall and Parmentier (2003): Influence of grain size evolution on convective instability. Geochem. Geophys. Geosyst., 4(3).
               grain_size_reduction = reciprocal_required_strain[phase_index] * dislocation_strain_rate * grain_size * grain_growth_timestep;
             }
+          else
+            AssertThrow(false, ExcNotImplemented());
 
           grain_size_change = grain_size_growth - grain_size_reduction;
 
@@ -379,37 +417,26 @@ namespace aspect
     template <int dim>
     double
     GrainSize<dim>::
-    diffusion_viscosity (const double                  temperature,
-                         const double                  pressure,
-                         const std::vector<double>    &composition,
-                         const SymmetricTensor<2,dim> &strain_rate,
-                         const Point<dim>             &position) const
+    diffusion_viscosity (const double temperature,
+                         const double adiabatic_temperature,
+                         const double adiabatic_pressure,
+                         const double grain_size,
+                         const double second_strain_rate_invariant,
+                         const Point<dim> &position) const
     {
-      const SymmetricTensor<2,dim> shear_strain_rate = strain_rate - 1./dim * trace(strain_rate) * unit_symmetric_tensor<dim>();
-      const double second_strain_rate_invariant = std::sqrt(std::max(-second_invariant(shear_strain_rate), 0.));
-
-      const double grain_size = composition[this->introspection().compositional_index_for_name("grain_size")];
-
-      // Currently this will never be called without adiabatic_conditions initialized, but just in case
-      const double adiabatic_pressure = this->get_adiabatic_conditions().is_initialized()
-                                        ?
-                                        this->get_adiabatic_conditions().pressure(position)
-                                        :
-                                        pressure;
-
       // find out in which phase we are
       const unsigned int phase_index = get_phase_index(position, temperature, adiabatic_pressure);
 
-      double energy_term = exp((diffusion_activation_energy[phase_index] + diffusion_activation_volume[phase_index] * adiabatic_pressure)
-                               / (diffusion_creep_exponent[phase_index] * constants::gas_constant * temperature));
+      double energy_term = std::exp((diffusion_activation_energy[phase_index] + diffusion_activation_volume[phase_index] * adiabatic_pressure)
+                                    / (diffusion_creep_exponent[phase_index] * constants::gas_constant * temperature));
 
       // If the adiabatic profile is already calculated we can use it to limit
       // variations in viscosity due to temperature.
       if (this->get_adiabatic_conditions().is_initialized())
         {
           const double adiabatic_energy_term
-            = exp((diffusion_activation_energy[phase_index] + diffusion_activation_volume[phase_index] * adiabatic_pressure)
-                  / (diffusion_creep_exponent[phase_index] * constants::gas_constant * this->get_adiabatic_conditions().temperature(position)));
+            = std::exp((diffusion_activation_energy[phase_index] + diffusion_activation_volume[phase_index] * adiabatic_pressure)
+                       / (diffusion_creep_exponent[phase_index] * constants::gas_constant * adiabatic_temperature));
 
           const double temperature_dependence = energy_term / adiabatic_energy_term;
           if (temperature_dependence > max_temperature_dependence_of_eta)
@@ -420,9 +447,9 @@ namespace aspect
 
       const double strain_rate_dependence = (1.0 - diffusion_creep_exponent[phase_index]) / diffusion_creep_exponent[phase_index];
 
-      return pow(diffusion_creep_prefactor[phase_index],-1.0/diffusion_creep_exponent[phase_index])
+      return diffusion_creep_prefactor[phase_index]
              * std::pow(second_strain_rate_invariant,strain_rate_dependence)
-             * pow(grain_size, diffusion_creep_grain_size_exponent[phase_index]/diffusion_creep_exponent[phase_index])
+             * std::pow(grain_size, diffusion_creep_grain_size_exponent[phase_index]/diffusion_creep_exponent[phase_index])
              * energy_term;
     }
 
@@ -431,77 +458,27 @@ namespace aspect
     template <int dim>
     double
     GrainSize<dim>::
-    dislocation_viscosity (const double      temperature,
-                           const double      pressure,
-                           const std::vector<double> &composition,
+    dislocation_viscosity (const double temperature,
+                           const double adiabatic_temperature,
+                           const double adiabatic_pressure,
                            const SymmetricTensor<2,dim> &strain_rate,
                            const Point<dim> &position,
+                           const double diffusion_viscosity,
                            const double viscosity_guess) const
     {
-      const double diff_viscosity = diffusion_viscosity(temperature,pressure,composition,strain_rate,position) ;
-
-      // Start the iteration with the full strain rate
-      double dis_viscosity;
-      if (viscosity_guess == 0)
-        dis_viscosity = dislocation_viscosity_fixed_strain_rate(temperature,pressure,std::vector<double>(),strain_rate,position);
-      else
-        dis_viscosity = viscosity_guess;
-
-      double dis_viscosity_old = 0;
-      unsigned int i = 0;
-      while ((std::abs((dis_viscosity-dis_viscosity_old) / dis_viscosity) > dislocation_viscosity_iteration_threshold)
-             && (i < dislocation_viscosity_iteration_number))
-        {
-          const SymmetricTensor<2,dim> dislocation_strain_rate = diff_viscosity
-                                                                 / (diff_viscosity + dis_viscosity) * strain_rate;
-          dis_viscosity_old = dis_viscosity;
-          dis_viscosity = dislocation_viscosity_fixed_strain_rate(temperature,
-                                                                  pressure,
-                                                                  std::vector<double>(),
-                                                                  dislocation_strain_rate,
-                                                                  position);
-          ++i;
-        }
-
-      Assert(i<dislocation_viscosity_iteration_number,ExcInternalError());
-
-      return dis_viscosity;
-    }
-
-
-
-    template <int dim>
-    double
-    GrainSize<dim>::
-    dislocation_viscosity_fixed_strain_rate (const double      temperature,
-                                             const double      pressure,
-                                             const std::vector<double> &,
-                                             const SymmetricTensor<2,dim> &dislocation_strain_rate,
-                                             const Point<dim> &position) const
-    {
-      const SymmetricTensor<2,dim> shear_strain_rate = dislocation_strain_rate - 1./dim * trace(dislocation_strain_rate) * unit_symmetric_tensor<dim>();
-      const double second_strain_rate_invariant = std::sqrt(std::max(-second_invariant(shear_strain_rate), 0.));
-
-      // Currently this will never be called without adiabatic_conditions initialized, but just in case
-      const double adiabatic_pressure = this->get_adiabatic_conditions().is_initialized()
-                                        ?
-                                        this->get_adiabatic_conditions().pressure(position)
-                                        :
-                                        pressure;
-
       // find out in which phase we are
       const unsigned int phase_index = get_phase_index(position, temperature, adiabatic_pressure);
 
-      double energy_term = exp((dislocation_activation_energy[phase_index] + dislocation_activation_volume[phase_index] * adiabatic_pressure)
-                               / (dislocation_creep_exponent[phase_index] * constants::gas_constant * temperature));
+      double energy_term = std::exp((dislocation_activation_energy[phase_index] + dislocation_activation_volume[phase_index] * adiabatic_pressure)
+                                    / (dislocation_creep_exponent[phase_index] * constants::gas_constant * temperature));
 
       // If we are past the initialization of the adiabatic profile, use it to
       // limit viscosity variations due to temperature.
       if (this->get_adiabatic_conditions().is_initialized())
         {
           const double adiabatic_energy_term
-            = exp((dislocation_activation_energy[phase_index] + dislocation_activation_volume[phase_index] * adiabatic_pressure)
-                  / (dislocation_creep_exponent[phase_index] * constants::gas_constant * this->get_adiabatic_conditions().temperature(position)));
+            = std::exp((dislocation_activation_energy[phase_index] + dislocation_activation_volume[phase_index] * adiabatic_pressure)
+                       / (dislocation_creep_exponent[phase_index] * constants::gas_constant * adiabatic_temperature));
 
           const double temperature_dependence = energy_term / adiabatic_energy_term;
           if (temperature_dependence > max_temperature_dependence_of_eta)
@@ -511,38 +488,37 @@ namespace aspect
         }
 
       const double strain_rate_dependence = (1.0 - dislocation_creep_exponent[phase_index]) / dislocation_creep_exponent[phase_index];
-
-      return std::pow(dislocation_creep_prefactor[phase_index],-1.0/dislocation_creep_exponent[phase_index])
-             * std::pow(second_strain_rate_invariant,strain_rate_dependence)
-             * energy_term;
-    }
-
-
-
-    template <int dim>
-    double
-    GrainSize<dim>::
-    viscosity (const double temperature,
-               const double pressure,
-               const std::vector<double> &composition,
-               const SymmetricTensor<2,dim> &strain_rate,
-               const Point<dim> &position) const
-    {
       const SymmetricTensor<2,dim> shear_strain_rate = strain_rate - 1./dim * trace(strain_rate) * unit_symmetric_tensor<dim>();
       const double second_strain_rate_invariant = std::sqrt(std::max(-second_invariant(shear_strain_rate), 0.));
 
-      const double diff_viscosity = diffusion_viscosity(temperature, pressure, composition, strain_rate, position);
-
-      double effective_viscosity;
-      if (std::abs(second_strain_rate_invariant) > 1e-30)
-        {
-          const double disl_viscosity = dislocation_viscosity(temperature, pressure, composition, strain_rate, position);
-          effective_viscosity = disl_viscosity * diff_viscosity / (disl_viscosity + diff_viscosity);
-        }
+      // Start the iteration with the full strain rate
+      double dis_viscosity;
+      if (viscosity_guess == 0)
+        dis_viscosity = dislocation_creep_prefactor[phase_index]
+                        * std::pow(second_strain_rate_invariant,strain_rate_dependence)
+                        * energy_term;
       else
-        effective_viscosity = diff_viscosity;
+        dis_viscosity = viscosity_guess;
 
-      return effective_viscosity;
+      double dis_viscosity_old = 0;
+      unsigned int i = 0;
+      while ((std::abs((dis_viscosity-dis_viscosity_old) / dis_viscosity) > dislocation_viscosity_iteration_threshold)
+             && (i < dislocation_viscosity_iteration_number))
+        {
+          const SymmetricTensor<2,dim> dislocation_strain_rate = diffusion_viscosity
+                                                                 / (diffusion_viscosity + dis_viscosity) * shear_strain_rate;
+          const double dislocation_strain_rate_invariant = std::sqrt(std::max(-second_invariant(dislocation_strain_rate), 0.));
+
+          dis_viscosity_old = dis_viscosity;
+          dis_viscosity = dislocation_creep_prefactor[phase_index]
+                          * std::pow(dislocation_strain_rate_invariant,strain_rate_dependence)
+                          * energy_term;
+          ++i;
+        }
+
+      Assert(i<dislocation_viscosity_iteration_number,ExcInternalError());
+
+      return dis_viscosity;
     }
 
 
@@ -828,7 +804,6 @@ namespace aspect
             convert_log_grain_size(composition);
           else
             {
-              const unsigned int grain_size_index = this->introspection().compositional_index_for_name("grain_size");
               composition[grain_size_index] = std::max(min_grain_size,composition[grain_size_index]);
             }
 
@@ -890,11 +865,27 @@ namespace aspect
               const SymmetricTensor<2,dim> shear_strain_rate = in.strain_rate[i] - 1./dim * trace(in.strain_rate[i]) * unit_symmetric_tensor<dim>();
               const double second_strain_rate_invariant = std::sqrt(std::max(-second_invariant(shear_strain_rate), 0.));
 
-              const double diff_viscosity = diffusion_viscosity(in.temperature[i], pressure, composition, in.strain_rate[i], in.position[i]);
+              const double adiabatic_temperature = this->get_adiabatic_conditions().is_initialized()
+                                                   ?
+                                                   this->get_adiabatic_conditions().temperature(in.position[i])
+                                                   :
+                                                   in.temperature[i];
+              const double adiabatic_pressure = this->get_adiabatic_conditions().is_initialized()
+                                                ?
+                                                this->get_adiabatic_conditions().pressure(in.position[i])
+                                                :
+                                                in.pressure[i];
+
+              const double diff_viscosity = diffusion_viscosity(in.temperature[i],
+                                                                adiabatic_temperature,
+                                                                adiabatic_pressure,
+                                                                composition[grain_size_index],
+                                                                second_strain_rate_invariant,
+                                                                in.position[i]);
 
               if (std::abs(second_strain_rate_invariant) > 1e-30)
                 {
-                  disl_viscosity = dislocation_viscosity(in.temperature[i], pressure, composition, in.strain_rate[i], in.position[i]);
+                  disl_viscosity = dislocation_viscosity(in.temperature[i], adiabatic_temperature, adiabatic_pressure, in.strain_rate[i], in.position[i], diff_viscosity);
                   effective_viscosity = disl_viscosity * diff_viscosity / (disl_viscosity + diff_viscosity);
                 }
               else
@@ -907,15 +898,28 @@ namespace aspect
                   disl_viscosities_out->dislocation_viscosities[i] = std::min(std::max(min_eta,disl_viscosity),1e300);
                   disl_viscosities_out->diffusion_viscosities[i] = std::min(std::max(min_eta,diff_viscosity),1e300);
                 }
+
+              if (HeatingModel::ShearHeatingOutputs<dim> *shear_heating_out = out.template get_additional_output<HeatingModel::ShearHeatingOutputs<dim>>())
+                {
+                  if (grain_size_evolution_formulation == Formulation::paleowattmeter ||
+                      grain_size_evolution_formulation == Formulation::paleopiezometer)
+                    {
+                      const double f = boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f * out.viscosities[i] / std::min(std::max(min_eta,disl_viscosity),1e300);
+                    }
+                  else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+                    {
+                      const double f = compute_partitioning_fraction(in.temperature[i]);
+                      shear_heating_out->shear_heating_work_fractions[i] = 1. - f;
+                    }
+                  else
+                    AssertThrow(false, ExcNotImplemented());
+                }
             }
 
           out.densities[i] = density(in.temperature[i], pressure, in.composition[i], in.position[i]);
           out.thermal_conductivities[i] = k_value;
           out.compressibilities[i] = compressibility(in.temperature[i], pressure, composition, in.position[i]);
-
-          if (DislocationViscosityOutputs<dim> *disl_viscosities_out = out.template get_additional_output<DislocationViscosityOutputs<dim>>())
-            disl_viscosities_out->boundary_area_change_work_fractions[i] =
-              boundary_area_change_work_fraction[get_phase_index(in.position[i],in.temperature[i],pressure)];
 
           if (in.requests_property(MaterialProperties::reaction_terms))
             for (unsigned int c=0; c<composition.size(); ++c)
@@ -1110,10 +1114,10 @@ namespace aspect
                              "When set to zero, grain size will not be reduced. "
                              "Units: \\si{\\meter}.");
           prm.declare_entry ("Volume fraction of phase", "0.4",
-                             Patterns::List (Patterns::Double (0., 1.)),
-                             "The volume fraction of one of the phases in the two phases evolved using Bercovici and "
-                             "Richard (2012). The volume fraction of the other phase can be simply calculated by subtracting "
-                             "from one."
+                             Patterns::Double (0., 1.),
+                             "The volume fraction of one of the phases in the two-phase damage model of Bercovici and Ricard (2012). "
+                             "The volume fraction of the other phase can be simply calculated by subtracting from one. "
+                             "This parameter is only used in the pinned state grain damage formulation."
                              "Units: none.");
           prm.declare_entry ("Grain size evolution formulation", "paleowattmeter",
                              Patterns::Selection ("paleowattmeter|paleopiezometer|pinned grain damage"),
@@ -1291,6 +1295,35 @@ namespace aspect
                              Patterns::Bool (),
                              "This parameter determines whether to use bilinear interpolation "
                              "to compute material properties (slower but more accurate).");
+          prm.enter_subsection("Grain damage partitioning");
+          {
+            prm.declare_entry ("Mantle temperature", "1600",
+                               Patterns::Double (0.),
+                               "This parameter determines the temperature at which the computed coefficient of shear energy "
+                               "partitioned into grain damage is minimum. This is used in the pinned state limit of the grain "
+                               "size evolution. One choice of this parameter is the mantle temperature at the ridge axis, "
+                               "see Mulyukova, E., & Bercovici, D. (2018) for details.");
+            prm.declare_entry ("Surface temperature", "283",
+                               Patterns::Double (0.),
+                               "This parameter determines the temperature at which the computed coefficient of shear energy "
+                               "partitioned into grain damage is maximum. This is used in the pinned state limit of the grain "
+                               "size evolution. One choice of this parameter is the surface temperature of the seafloor, see "
+                               "Mulyukova, E., & Bercovici, D. (2018) for details.");
+            prm.declare_entry ("Minimum grain size reduction work fraction", "1e-12",
+                               Patterns::Double (0.),
+                               "This parameter determines the minimum value of the partitioning coefficient, which governs "
+                               "amount of shear heating partitioned into grain damage in the pinned state limit." );
+            prm.declare_entry ("Maximum grain size reduction work fraction", "1e-1",
+                               Patterns::Double (0.),
+                               "This parameter determines the maximum value of the partitioning coefficient, which governs "
+                               "amount of shear heating partitioned into grain damage in the pinned state limit.");
+            prm.declare_entry ("Grain size reduction work fraction exponent", "10",
+                               Patterns::Double (0.),
+                               "This parameter determines the variability in how much shear heating is partitioned into "
+                               "grain damage. A higher value suggests a wider temperature range over which the partitioning "
+                               "coefficient is high.");
+          }
+          prm.leave_subsection();
         }
         prm.leave_subsection();
       }
@@ -1307,6 +1340,7 @@ namespace aspect
                    ExcMessage("The 'grain size' material model only works if a compositional "
                               "field with name 'grain_size' is present. Please use another material "
                               "model or add such a field."));
+      grain_size_index = this->introspection().compositional_index_for_name("grain_size");
 
       prm.enter_subsection("Material model");
       {
@@ -1364,13 +1398,10 @@ namespace aspect
                  ExcMessage("The parameter 'Use paleowattmeter' has been removed. "
                             "Use the parameter 'Grain size evolution formulation instead'."));
 
-          volume_fraction_phase_one             = Utilities::string_to_double
-                                                  (Utilities::split_string_list(prm.get ("Volume fraction of phase")));
+          volume_fraction_phase_one             = prm.get_double ("Volume fraction of phase");
 
-          if (volume_fraction_phase_one.size()>1)
-            for (unsigned int i=0; i<volume_fraction_phase_one.size(); ++i)
-              AssertThrow( (volume_fraction_phase_one[i] == 0. || volume_fraction_phase_one[i] == 1.),
-                           ExcMessage("Error: Volume fraction should be between (0, 1) to use two phase flow !"));
+          AssertThrow( (volume_fraction_phase_one != 0. && volume_fraction_phase_one != 1.),
+                       ExcMessage("Error: Volume fraction must be between (0, 1) to use two phase damage in the pinned state!"));
 
 
           grain_boundary_energy                 = Utilities::string_to_double
@@ -1379,6 +1410,19 @@ namespace aspect
                                                   (Utilities::split_string_list(prm.get ("Work fraction for boundary area change")));
           geometric_constant                    = Utilities::string_to_double
                                                   (Utilities::split_string_list(prm.get ("Geometric constant")));
+
+          if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            {
+              prm.enter_subsection("Grain damage partitioning");
+              {
+                grain_size_reduction_work_fraction_exponent = prm.get_double ("Grain size reduction work fraction exponent");
+                maximum_grain_size_reduction_work_fraction  = prm.get_double ("Maximum grain size reduction work fraction");
+                minimum_grain_size_reduction_work_fraction  = prm.get_double ("Minimum grain size reduction work fraction");
+                mantle_temperature                          = prm.get_double ("Mantle temperature");
+                surface_temperature                         = prm.get_double ("Surface temperature");
+              }
+              prm.leave_subsection();
+            }
 
           // rheology parameters
           dislocation_viscosity_iteration_threshold = prm.get_double("Dislocation viscosity iteration threshold");
@@ -1413,10 +1457,16 @@ namespace aspect
           pv_grain_size_scaling                 = prm.get_double ("Lower mantle grain size scaling");
 
           // scale recrystallized grain size, diffusion creep and grain growth prefactor accordingly
-          diffusion_creep_prefactor[diffusion_creep_prefactor.size()-1] *= pow(pv_grain_size_scaling,diffusion_creep_grain_size_exponent[diffusion_creep_grain_size_exponent.size()-1]);
-          grain_growth_rate_constant[grain_growth_rate_constant.size()-1] *= pow(pv_grain_size_scaling,grain_growth_exponent[grain_growth_exponent.size()-1]);
+          diffusion_creep_prefactor[diffusion_creep_prefactor.size()-1] *= std::pow(pv_grain_size_scaling,diffusion_creep_grain_size_exponent[diffusion_creep_grain_size_exponent.size()-1]);
+          grain_growth_rate_constant[grain_growth_rate_constant.size()-1] *= std::pow(pv_grain_size_scaling,grain_growth_exponent[grain_growth_exponent.size()-1]);
           if (recrystallized_grain_size.size()>0)
             recrystallized_grain_size[recrystallized_grain_size.size()-1] *= pv_grain_size_scaling;
+
+          // prefactors never appear without their exponents. perform some calculations here to save time later
+          for (unsigned int i=0; i<diffusion_creep_prefactor.size(); ++i)
+            diffusion_creep_prefactor[i] = std::pow(diffusion_creep_prefactor[i],-1.0/diffusion_creep_exponent[i]);
+          for (unsigned int i=0; i<dislocation_creep_prefactor.size(); ++i)
+            dislocation_creep_prefactor[i] = std::pow(dislocation_creep_prefactor[i],-1.0/dislocation_creep_exponent[i]);
 
           if (grain_size_evolution_formulation == Formulation::paleowattmeter)
             boundary_area_change_work_fraction[boundary_area_change_work_fraction.size()-1] /= pv_grain_size_scaling;
@@ -1450,10 +1500,22 @@ namespace aspect
                             ExcMessage("Error: One of the lists of grain size evolution parameters "
                                        "given for the paleowattmeter does not have the correct length!"));
             }
+          else if (grain_size_evolution_formulation == Formulation::paleopiezometer)
+            {
+              AssertThrow(grain_growth_activation_energy.size() == reciprocal_required_strain.size(),
+                          ExcMessage("Error: The list of grain size evolution parameters in the "
+                                     "paleopiezometer does not have the correct length!"));
+            }
+          else if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            {
+              AssertThrow(transition_depths.size() == 0,
+                          ExcMessage("Error: Currently, the pinned grain damage formulation is only implemented for one mineral phase."));
+            }
           else
-            AssertThrow(grain_growth_activation_energy.size() == reciprocal_required_strain.size(),
-                        ExcMessage("Error: The list of grain size evolution parameters in the "
-                                   "paleopiezometer does not have the correct length!"));
+            AssertThrow(false,
+                        ExcMessage("Error: The size of lists in grain size evolution and flow law parameters "
+                                   "should follow either of the 'paleowattmeter|paleopiezometer|pinned grain damage' "
+                                   "formulations!"));
 
           AssertThrow(grain_growth_activation_energy.size() == transition_depths.size()+1,
                       ExcMessage("Error: The lists of grain size evolution and flow law parameters need to "
@@ -1482,7 +1544,7 @@ namespace aspect
           // wrong compositional fields.
           if (use_table_properties && material_file_names.size() > 1)
             {
-              AssertThrow(this->introspection().compositional_index_for_name("grain_size") >= material_file_names.size(),
+              AssertThrow(grain_size_index >= material_file_names.size(),
                           ExcMessage("The compositional fields indicating the major element composition need to be first in the "
                                      "list of compositional fields, but the grain size field seems to have a lower index than the number "
                                      "of provided data files. This is likely inconsistent. Please check the number of provided data "
@@ -1542,14 +1604,21 @@ namespace aspect
     void
     GrainSize<dim>::create_additional_named_outputs (MaterialModel::MaterialModelOutputs<dim> &out) const
     {
-      // These properties are useful as output, but will also be used by the
-      // heating model to reduce shear heating by the amount of work done to
-      // reduce grain size.
+      // These properties are useful as output.
       if (out.template get_additional_output<DislocationViscosityOutputs<dim>>() == nullptr)
         {
           const unsigned int n_points = out.n_evaluation_points();
           out.additional_outputs.push_back(
             std::make_unique<MaterialModel::DislocationViscosityOutputs<dim>> (n_points));
+        }
+
+      // These properties will be used by the heating model to reduce
+      // shear heating by the amount of work done to reduce grain size.
+      if (out.template get_additional_output<HeatingModel::ShearHeatingOutputs<dim>>() == nullptr)
+        {
+          const unsigned int n_points = out.n_evaluation_points();
+          out.additional_outputs.push_back(
+            std::make_unique<HeatingModel::ShearHeatingOutputs<dim>> (n_points));
         }
 
       // These properties are only output properties.

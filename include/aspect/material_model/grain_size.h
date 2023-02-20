@@ -61,14 +61,6 @@ namespace aspect
          * the current object.
          */
         std::vector<double> diffusion_viscosities;
-
-        /**
-         * This contains the fraction of the deformation work that is
-         * converted to surface energy of grains instead of thermal energy.
-         * It is used to reduce the shear heating by this fraction. If it
-         * is set to 0.0 it will not change the shear heating.
-         */
-        std::vector<double> boundary_area_change_work_fractions;
     };
 
 
@@ -183,6 +175,11 @@ namespace aspect
         double k_value;
 
         /**
+         * The index of the compositional field that represents the grain size.
+        */
+        unsigned int grain_size_index;
+
+        /**
          * Parameters controlling the grain size evolution.
          */
         std::vector<double> grain_growth_activation_energy;
@@ -192,7 +189,6 @@ namespace aspect
         double              minimum_grain_size;
         std::vector<double> reciprocal_required_strain;
         std::vector<double> recrystallized_grain_size;
-        std::vector<double> volume_fraction_phase_one;
 
         /**
          * Parameters controlling the dynamic grain recrystallization.
@@ -262,15 +258,33 @@ namespace aspect
         typename Formulation::Kind grain_size_evolution_formulation;
 
         /**
-         * Functions controlling conversion from interface roughness to grain size,
-         * used in pinned state formulation of grain size evolution.
+        * This function returns the fraction of shear heating energy partitioned
+        * into grain damage using the implementation by Mulyukova and Bercovici (2018)
+        * Collapse of passive margins by lithospheric damage
+        * and plunging grain size. Earth and Planetary Science Letters, 484, 341-352.
+        */
+        double  compute_partitioning_fraction (const double temperature) const;
+
+        /**
+         * Parameters controlling the partitioning of energy
+         * into grain damage in the pinned state.
+         */
+        double              grain_size_reduction_work_fraction_exponent;
+        double              maximum_grain_size_reduction_work_fraction;
+        double              minimum_grain_size_reduction_work_fraction;
+        double              mantle_temperature;
+        double              surface_temperature;
+
+        /**
+         * Functions and parameters controlling conversion from interface roughness to grain size,
+         * used in pinned state formulation of grain damage.
          *
          * Detailed description of this approach can be found in Appendix H.1 of
          * Bercovici, David, and Yanick Ricard (2012).
          * Mechanisms for the generation of plate tectonics by two-phase grain-damage
          * and pinning. Physics of the Earth and Planetary Interiors 202 (2012): 27-55.
          */
-        double moment_of_grain_size_distribution (const int n) const;
+        double                                   volume_fraction_phase_one;
 
         double roughness_to_grain_size_factor    (const double volume_fraction_phase_one) const;
 
@@ -313,17 +327,11 @@ namespace aspect
          */
         bool advect_log_grainsize;
 
-
-        double viscosity (const double                  temperature,
-                          const double                  pressure,
-                          const std::vector<double>    &compositional_fields,
-                          const SymmetricTensor<2,dim> &strain_rate,
-                          const Point<dim>             &position) const;
-
-        double diffusion_viscosity (const double      temperature,
-                                    const double      pressure,
-                                    const std::vector<double>    &compositional_fields,
-                                    const SymmetricTensor<2,dim> &,
+        double diffusion_viscosity (const double temperature,
+                                    const double adiabatic_temperature,
+                                    const double adiabatic_pressure,
+                                    const double grain_size,
+                                    const double second_strain_rate_invariant,
                                     const Point<dim> &position) const;
 
         /**
@@ -337,22 +345,13 @@ namespace aspect
          * unless a guess for the viscosity is provided, which can reduce the
          * number of iterations significantly.
          */
-        double dislocation_viscosity (const double      temperature,
-                                      const double      pressure,
-                                      const std::vector<double>    &compositional_fields,
+        double dislocation_viscosity (const double temperature,
+                                      const double adiabatic_temperature,
+                                      const double adiabatic_pressure,
                                       const SymmetricTensor<2,dim> &strain_rate,
                                       const Point<dim> &position,
+                                      const double diffusion_viscosity,
                                       const double viscosity_guess = 0) const;
-
-        /**
-         * This function calculates the dislocation viscosity for a given
-         * dislocation strain rate.
-         */
-        double dislocation_viscosity_fixed_strain_rate (const double      temperature,
-                                                        const double      pressure,
-                                                        const std::vector<double> &,
-                                                        const SymmetricTensor<2,dim> &dislocation_strain_rate,
-                                                        const Point<dim> &position) const;
 
         double density (const double temperature,
                         const double pressure,
