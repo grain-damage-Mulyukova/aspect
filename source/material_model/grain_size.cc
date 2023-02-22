@@ -211,6 +211,54 @@ namespace aspect
 
 
 
+    namespace
+    {
+      // This function returns the log normal distribution of the grain size.
+      // Description can be found in eq 8 of Bercovici and Ricard (2012)
+      double
+      moment_of_grain_size_distribution (const unsigned int n)
+      {
+        // This is the variance of the log-normal distribution
+        const double sigma = 0.8;
+
+        return exp (n * n * sigma * sigma / 2.);
+      }
+    }
+
+
+
+    template <int dim>
+    double
+    GrainSize<dim>::
+    roughness_to_grain_size_factor (const double volume_fraction_phase_one)  const
+    {
+      const double b1 = 1./20. ;
+      const double c1 = 3.0 * b1 * moment_of_grain_size_distribution(4) / (8.0 * moment_of_grain_size_distribution (2));
+
+      const double volume_fraction_phase_two = 1. - volume_fraction_phase_one;
+
+      const double h1 = c1 * (1 - volume_fraction_phase_one);
+      const double h2 = c1 * (1 - volume_fraction_phase_two);
+
+      const double one_over_sqrt_h = volume_fraction_phase_one /std::sqrt (h1)  + volume_fraction_phase_two / std::sqrt(h2) ;
+
+      return (1./one_over_sqrt_h);
+    }
+
+
+    template <int dim>
+    double
+    GrainSize<dim>::
+    phase_distribution_function (const double volume_fraction_phase_one)  const
+    {
+      // This factor is used in pinned state grain damage formulation.
+      const double volume_fraction_phase_two = 1. - volume_fraction_phase_one;
+
+      return (volume_fraction_phase_one * volume_fraction_phase_two);
+    }
+
+
+
     template <int dim>
     double
     GrainSize<dim>::
@@ -270,10 +318,19 @@ namespace aspect
 
           // grain size growth due to Ostwald ripening
           const double m = grain_growth_exponent[phase_index];
-          const double grain_size_growth_rate = grain_growth_rate_constant[phase_index] / (m * std::pow(grain_size,m-1))
-                                                * std::exp(- (grain_growth_activation_energy[phase_index] + pressure * grain_growth_activation_volume[phase_index])
-                                                           / (constants::gas_constant * temperature));
-          const double grain_size_growth = grain_size_growth_rate * grain_growth_timestep;
+
+          double grain_size_growth_rate = grain_growth_rate_constant[phase_index] / (m * std::pow(grain_size,m-1))
+                                          * std::exp(- (grain_growth_activation_energy[phase_index] + pressure * grain_growth_activation_volume[phase_index])
+                                                     / (constants::gas_constant * temperature));
+
+          // in the two-phase damage model grain growth depends on the proportion of the two phases
+          if (grain_size_evolution_formulation == Formulation::pinned_grain_damage)
+            grain_size_growth_rate *= geometric_constant[phase_index] * phase_distribution_function (volume_fraction_phase_one) /
+                                      std::pow(roughness_to_grain_size_factor(volume_fraction_phase_one), m)
+
+
+
+                                      const double grain_size_growth = grain_size_growth_rate * grain_growth_timestep;
 
           // grain size reduction in dislocation creep regime
           const SymmetricTensor<2,dim> shear_strain_rate = strain_rate - 1./dim * trace(strain_rate) * unit_symmetric_tensor<dim>();
@@ -306,7 +363,8 @@ namespace aspect
               // pinned_grain_damage: Mulyukova and Bercovici (2018) Collapse of passive margins by lithospheric damage and plunging grain size. Earth and Planetary Science Letters, 484, 341-352.
               const double stress = 2.0 * second_strain_rate_invariant * current_viscosity;
               const double grain_size_reduction_rate = 2.0 * stress * compute_partitioning_fraction(temperature) * second_strain_rate_invariant * pow(grain_size,2)
-                                                       / (geometric_constant[phase_index] * grain_boundary_energy[phase_index]);
+                                                       * roughness_to_grain_size_factor (volume_fraction_phase_one) * roughness_to_grain_size_factor (volume_fraction_phase_one)
+                                                       / (geometric_constant[phase_index] * grain_boundary_energy[phase_index] * phase_distribution_function(volume_fraction_phase_one));
               grain_size_reduction = grain_size_reduction_rate * grain_growth_timestep;
             }
           else if (grain_size_evolution_formulation == Formulation::paleopiezometer)
@@ -1068,6 +1126,12 @@ namespace aspect
                              "The grain size $d_{ph}$ to that a phase will be reduced to when crossing a phase transition. "
                              "When set to zero, grain size will not be reduced. "
                              "Units: \\si{\\meter}.");
+          prm.declare_entry ("Volume fraction of phase", "0.4",
+                             Patterns::Double (0., 1.),
+                             "The volume fraction of one of the phases in the two-phase damage model of Bercovici and Ricard (2012). "
+                             "The volume fraction of the other phase can be simply calculated by subtracting from one. "
+                             "This parameter is only used in the pinned state grain damage formulation."
+                             "Units: none.");
           prm.declare_entry ("Grain size evolution formulation", "paleowattmeter",
                              Patterns::Selection ("paleowattmeter|paleopiezometer|pinned grain damage"),
                              "A flag indicating whether the material model should use the "
@@ -1346,6 +1410,11 @@ namespace aspect
           Assert(use_paleowattmeter == "default",
                  ExcMessage("The parameter 'Use paleowattmeter' has been removed. "
                             "Use the parameter 'Grain size evolution formulation instead'."));
+
+          volume_fraction_phase_one             = prm.get_double ("Volume fraction of phase");
+
+          AssertThrow( (volume_fraction_phase_one != 0. && volume_fraction_phase_one != 1.),
+                       ExcMessage("Error: Volume fraction must be between (0, 1) to use two phase damage in the pinned state!"));
 
 
           grain_boundary_energy                 = Utilities::string_to_double
